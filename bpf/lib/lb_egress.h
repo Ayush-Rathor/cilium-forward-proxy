@@ -2,6 +2,7 @@
 #pragma once
 
 #include "map_defs.h"
+#include "csum.h"
 
 struct lb_egress_key {
 	__be32 src_ip;
@@ -17,14 +18,17 @@ struct {
 	__type(value, struct lb_egress_val);
 	__uint(max_entries, 65536);
 	__uint(map_flags, LRU_MEM_FLAVOR);
-} lb_egress_map SEC(".maps");
+} lb_egress_map __section_maps_btf;
 
 static __always_inline int
-lb_egress_apply_v4(struct __ctx_buff *ctx __maybe_unused, struct iphdr *ip4)
+lb_egress_apply_v4(struct __ctx_buff *ctx, struct iphdr *ip4)
 {
 	struct lb_egress_key key = {};
 	struct lb_egress_val *val;
+	struct csum_offset csum = {};
 	__be32 old_saddr;
+	int l4_off;
+	int ret;
 
 	key.src_ip = ip4->saddr;
 
@@ -33,9 +37,39 @@ lb_egress_apply_v4(struct __ctx_buff *ctx __maybe_unused, struct iphdr *ip4)
 		return CTX_ACT_OK;
 
 	old_saddr = ip4->saddr;
-	ip4->saddr = val->lb_ip;
+	l4_off = ETH_HLEN + ipv4_hdrlen(ip4);
 
-	csum_replace4(&ip4->check, old_saddr, val->lb_ip);
+	/*
+	 * Update TCP/UDP/SCTP pseudo-header checksum before changing source IP.
+	 * For unsupported L4 protocols, csum_l4_offset_and_flags() leaves the
+	 * checksum offset unusable, so only call csum_l4_replace() for known
+	 * service protocols.
+	 */
+	switch (ip4->protocol) {
+	case IPPROTO_TCP:
+	case IPPROTO_UDP:
+	case IPPROTO_SCTP:
+		csum_l4_offset_and_flags(ip4->protocol, &csum);
+
+		ret = csum_l4_replace(ctx, l4_off, &csum,
+				      old_saddr, val->lb_ip,
+				      BPF_F_PSEUDO_HDR | sizeof(val->lb_ip));
+		if (IS_ERR(ret))
+			return ret;
+		break;
+	default:
+		break;
+	}
+
+	ret = l3_csum_replace(ctx,
+			      ETH_HLEN + offsetof(struct iphdr, check),
+			      old_saddr,
+			      val->lb_ip,
+			      BPF_F_HDR_FIELD_MASK);
+	if (IS_ERR(ret))
+		return ret;
+
+	ip4->saddr = val->lb_ip;
 
 	return CTX_ACT_OK;
 }
