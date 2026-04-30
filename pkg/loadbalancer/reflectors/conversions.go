@@ -383,44 +383,43 @@ func convertService(cfg loadbalancer.Config, extCfg loadbalancer.ExternalConfig,
 					fes = append(fes, fe)
 				}
 			}
-
 		}
-
-		// ExternalIP
-		for _, ip := range svc.Spec.ExternalIPs {
-			addr, err := cmtypes.ParseAddrCluster(ip)
-			if err != nil {
-				continue
-			}
-			if (!extCfg.EnableIPv6 && addr.Is6()) || (!extCfg.EnableIPv4 && addr.Is4()) {
-				log().Debug(
-					"Skipping ExternalIP due to disabled IP family",
-					logfields.IPv4, extCfg.EnableIPv4,
-					logfields.IPv6, extCfg.EnableIPv6,
-					logfields.Address, addr,
-				)
-				continue
-			}
-
-			for _, port := range svc.Spec.Ports {
-				fe := loadbalancer.FrontendParams{
-					Type:        loadbalancer.SVCTypeExternalIPs,
-					PortName:    loadbalancer.FEPortName(cache.Strings.Get(port.Name)),
-					ServiceName: name,
-					ServicePort: uint16(port.Port),
-				}
-				fe.Address = loadbalancer.NewL3n4Addr(
-					loadbalancer.L4Type(port.Protocol),
-					addr,
-					uint16(port.Port),
-					loadbalancer.ScopeExternal,
-				)
-				fes = append(fes, fe)
-			}
-		}
-
-		return
 	}
+
+	// ExternalIP
+	for _, ip := range svc.Spec.ExternalIPs {
+		addr, err := cmtypes.ParseAddrCluster(ip)
+		if err != nil {
+			continue
+		}
+		if (!extCfg.EnableIPv6 && addr.Is6()) || (!extCfg.EnableIPv4 && addr.Is4()) {
+			log().Debug(
+				"Skipping ExternalIP due to disabled IP family",
+				logfields.IPv4, extCfg.EnableIPv4,
+				logfields.IPv6, extCfg.EnableIPv6,
+				logfields.Address, addr,
+			)
+			continue
+		}
+
+		for _, port := range svc.Spec.Ports {
+			fe := loadbalancer.FrontendParams{
+				Type:        loadbalancer.SVCTypeExternalIPs,
+				PortName:    loadbalancer.FEPortName(cache.Strings.Get(port.Name)),
+				ServiceName: name,
+				ServicePort: uint16(port.Port),
+			}
+			fe.Address = loadbalancer.NewL3n4Addr(
+				loadbalancer.L4Type(port.Protocol),
+				addr,
+				uint16(port.Port),
+				loadbalancer.ScopeExternal,
+			)
+			fes = append(fes, fe)
+		}
+	}
+
+	return
 }
 func getIPFamilies(svc *slim_corev1.Service) []slim_corev1.IPFamily {
 	if len(svc.Spec.IPFamilies) == 0 {
