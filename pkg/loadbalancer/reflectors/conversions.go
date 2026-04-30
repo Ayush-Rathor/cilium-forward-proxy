@@ -58,6 +58,20 @@ func getAnnotationServiceForwardingMode(cfg loadbalancer.Config, svc *slim_corev
 	return loadbalancer.SVCForwardingModeUndef, nil
 }
 
+func getAnnotationServiceEgressSourceLBIP(svc *slim_corev1.Service) (bool, error) {
+	if value, ok := annotation.Get(svc, annotation.ServiceEgressSourceLBIP); ok {
+		switch strings.ToLower(strings.TrimSpace(value)) {
+		case "true":
+			return true, nil
+		case "false":
+			return false, nil
+		default:
+			return false, fmt.Errorf("value %q is not supported for %q", value, annotation.ServiceEgressSourceLBIP)
+		}
+	}
+	return false, nil
+}
+
 func isHeadless(svc *slim_corev1.Service) bool {
 	_, headless := svc.Labels[corev1.IsHeadlessService]
 	if strings.ToLower(svc.Spec.ClusterIP) == "none" {
@@ -96,6 +110,59 @@ func convertService(cfg loadbalancer.Config, extCfg loadbalancer.ExternalConfig,
 				logfields.Error, err,
 				logfields.Annotations, annotation.ServiceForwardingMode,
 			)
+		}
+	}
+
+	enabled, err := getAnnotationServiceEgressSourceLBIP(svc)
+	if err == nil {
+		s.EgressSourceLBIP = enabled
+	} else {
+		log().Warn("Ignoring annotation",
+			logfields.Error, err,
+			logfields.Annotations, annotation.ServiceEgressSourceLBIP,
+		)
+	}
+
+	if s.EgressSourceLBIP {
+		if svc.Spec.Type != slim_corev1.ServiceTypeLoadBalancer {
+			log().Warn("Ignoring annotation on non-LoadBalancer Service",
+				logfields.ServiceName, svc.GetName(),
+				logfields.K8sNamespace, svc.GetNamespace(),
+				logfields.Annotations, annotation.ServiceEgressSourceLBIP,
+			)
+			s.EgressSourceLBIP = false
+		}
+
+		if s.EgressSourceLBIP && len(svc.Spec.Selector) == 0 {
+			log().Warn("Ignoring annotation on Service without selector",
+				logfields.ServiceName, svc.GetName(),
+				logfields.K8sNamespace, svc.GetNamespace(),
+				logfields.Annotations, annotation.ServiceEgressSourceLBIP,
+			)
+			s.EgressSourceLBIP = false
+		}
+
+		if s.EgressSourceLBIP {
+			usableLBIPs := 0
+			for _, ip := range svc.Status.LoadBalancer.Ingress {
+				if ip.IP == "" {
+					continue
+				}
+				addr, err := netip.ParseAddr(ip.IP)
+				if err != nil || !addr.Is4() {
+					continue
+				}
+				usableLBIPs++
+			}
+
+			if usableLBIPs != 1 {
+				log().Warn("Ignoring annotation on Service without exactly one usable IPv4 LoadBalancer IP",
+					logfields.ServiceName, svc.GetName(),
+					logfields.K8sNamespace, svc.GetNamespace(),
+					logfields.Annotations, annotation.ServiceEgressSourceLBIP,
+				)
+				s.EgressSourceLBIP = false
+			}
 		}
 	}
 
@@ -318,44 +385,43 @@ func convertService(cfg loadbalancer.Config, extCfg loadbalancer.ExternalConfig,
 			}
 
 		}
-	}
 
-	// ExternalIP
-	for _, ip := range svc.Spec.ExternalIPs {
-		addr, err := cmtypes.ParseAddrCluster(ip)
-		if err != nil {
-			continue
-		}
-		if (!extCfg.EnableIPv6 && addr.Is6()) || (!extCfg.EnableIPv4 && addr.Is4()) {
-			log().Debug(
-				"Skipping ExternalIP due to disabled IP family",
-				logfields.IPv4, extCfg.EnableIPv4,
-				logfields.IPv6, extCfg.EnableIPv6,
-				logfields.Address, addr,
-			)
-			continue
-		}
-
-		for _, port := range svc.Spec.Ports {
-			fe := loadbalancer.FrontendParams{
-				Type:        loadbalancer.SVCTypeExternalIPs,
-				PortName:    loadbalancer.FEPortName(cache.Strings.Get(port.Name)),
-				ServiceName: name,
-				ServicePort: uint16(port.Port),
+		// ExternalIP
+		for _, ip := range svc.Spec.ExternalIPs {
+			addr, err := cmtypes.ParseAddrCluster(ip)
+			if err != nil {
+				continue
 			}
-			fe.Address = loadbalancer.NewL3n4Addr(
-				loadbalancer.L4Type(port.Protocol),
-				addr,
-				uint16(port.Port),
-				loadbalancer.ScopeExternal,
-			)
-			fes = append(fes, fe)
+			if (!extCfg.EnableIPv6 && addr.Is6()) || (!extCfg.EnableIPv4 && addr.Is4()) {
+				log().Debug(
+					"Skipping ExternalIP due to disabled IP family",
+					logfields.IPv4, extCfg.EnableIPv4,
+					logfields.IPv6, extCfg.EnableIPv6,
+					logfields.Address, addr,
+				)
+				continue
+			}
+
+			for _, port := range svc.Spec.Ports {
+				fe := loadbalancer.FrontendParams{
+					Type:        loadbalancer.SVCTypeExternalIPs,
+					PortName:    loadbalancer.FEPortName(cache.Strings.Get(port.Name)),
+					ServiceName: name,
+					ServicePort: uint16(port.Port),
+				}
+				fe.Address = loadbalancer.NewL3n4Addr(
+					loadbalancer.L4Type(port.Protocol),
+					addr,
+					uint16(port.Port),
+					loadbalancer.ScopeExternal,
+				)
+				fes = append(fes, fe)
+			}
 		}
+
+		return
 	}
-
-	return
 }
-
 func getIPFamilies(svc *slim_corev1.Service) []slim_corev1.IPFamily {
 	if len(svc.Spec.IPFamilies) == 0 {
 		// No IP families specified, try to deduce them from the cluster IPs

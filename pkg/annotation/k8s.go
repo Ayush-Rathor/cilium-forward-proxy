@@ -179,6 +179,10 @@ const (
 	//		use SNAT so that reply traffic comes back
 	ServiceForwardingMode = ServicePrefix + "/forwarding-mode"
 
+	// ServiceEgressSourceLBIP indicates that outbound external traffic from pods
+	// selected by this LoadBalancer Service should use the Service's LB IP as SNAT source.
+	ServiceEgressSourceLBIP = ServicePrefix + "/egress-source-lb-ip"
+
 	// NoTrack / NoTrackAlias is the annotation name used to store the port and
 	// protocol that we should bypass kernel conntrack for a given pod. This
 	// applies for both TCP and UDP connection. Current use case is NodeLocalDNS.

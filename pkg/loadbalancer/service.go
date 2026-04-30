@@ -76,6 +76,10 @@ type Service struct {
 	// +deepequal-gen=false
 	ProxyRedirect *ProxyRedirect
 
+	// EgressSourceLBIP indicates that external egress traffic from backends of
+	// this Service should use the Service's load balancer IP as SNAT source.
+	EgressSourceLBIP bool
+
 	// HealthCheckNodePort defines on which port the node runs a HTTP health
 	// check server which may be used by external loadbalancers to determine
 	// if a node has local backends. This will only have effect if both
@@ -269,6 +273,10 @@ func (svc *Service) TableRow() []string {
 
 	if svc.ForwardingMode != SVCForwardingModeUndef {
 		flags = append(flags, "ForwardingMode="+string(svc.ForwardingMode))
+	}
+
+	if svc.EgressSourceLBIP {
+		flags = append(flags, "EgressSourceLBIP=true")
 	}
 
 	if svc.TrafficDistribution != TrafficDistributionDefault {

@@ -32,6 +32,7 @@
 #include "lib/eth.h"
 #include "lib/dbg.h"
 #include "lib/l3.h"
+#include "lib/lb_egress.h"
 #include "lib/local_delivery.h"
 #include "lib/lxc.h"
 #include "lib/lrp.h"
@@ -1269,7 +1270,12 @@ ipv4_forward_to_destination(struct __ctx_buff *ctx, struct iphdr *ip4,
 						   ep, METRIC_EGRESS, from_l7lb,
 						   false, 0);
 		}
+	
 	}
+	
+	ret = lb_egress_apply_v4(ctx, ip4);
+	if (IS_ERR(ret))
+		return ret;
 
 	/* L7 proxy result in VTEP redirection in bpf_host, but when L7 proxy disabled
 	 * We want VTEP redirection handled earlier here to avoid packets passing to
