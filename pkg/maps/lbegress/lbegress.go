@@ -6,8 +6,18 @@ import (
 	"unsafe"
 
 	"github.com/cilium/ebpf"
+	"github.com/cilium/hive/cell"
 
 	"github.com/cilium/cilium/pkg/bpf"
+)
+
+var Cell = cell.Module(
+	"lbegress-map",
+	"LoadBalancer egress source IP BPF map",
+
+	cell.Provide(func() bpf.MapOut[*bpf.Map] {
+		return bpf.NewMapOut(Map)
+	}),
 )
 
 const (

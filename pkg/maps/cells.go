@@ -20,6 +20,7 @@ import (
 	"github.com/cilium/cilium/pkg/maps/fragmap"
 	"github.com/cilium/cilium/pkg/maps/l2respondermap"
 	"github.com/cilium/cilium/pkg/maps/l2v6respondermap"
+	"github.com/cilium/cilium/pkg/maps/lbegress"
 	"github.com/cilium/cilium/pkg/maps/lxcmap"
 	"github.com/cilium/cilium/pkg/maps/multicast"
 	"github.com/cilium/cilium/pkg/maps/nat"
@@ -63,6 +64,9 @@ var Cell = cell.Module(
 
 	// Provides access to egressgateway specific maps.
 	egressmap.Cell,
+
+	// Provides access to LoadBalancer egress source IP map.
+	lbegress.Cell,
 
 	// Initializes the fragments map in the datapath
 	fragmap.Cell,
