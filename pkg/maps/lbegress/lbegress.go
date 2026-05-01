@@ -15,7 +15,16 @@ var Cell = cell.Module(
 	"lbegress-map",
 	"LoadBalancer egress source IP BPF map",
 
-	cell.Provide(func() bpf.MapOut[*bpf.Map] {
+	cell.Provide(func(lc cell.Lifecycle) bpf.MapOut[*bpf.Map] {
+		lc.Append(cell.Hook{
+			OnStart: func(cell.HookContext) error {
+				return Map.OpenOrCreate()
+			},
+			OnStop: func(cell.HookContext) error {
+				return Map.Close()
+			},
+		})
+
 		return bpf.NewMapOut(Map)
 	}),
 )

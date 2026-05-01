@@ -16,6 +16,7 @@ struct {
 	__uint(type, BPF_MAP_TYPE_LRU_HASH);
 	__type(key, struct lb_egress_key);
 	__type(value, struct lb_egress_val);
+	__uint(pinning, LIBBPF_PIN_BY_NAME);
 	__uint(max_entries, 65536);
 	__uint(map_flags, LRU_MEM_FLAVOR);
 } lb_egress_map __section_maps_btf;

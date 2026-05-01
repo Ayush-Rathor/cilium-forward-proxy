@@ -635,6 +635,18 @@ type LBAffinityVal struct {
 	Pad       uint32
 }
 
+// LBEgressKey is generated from the BPF C type lb_egress_key.
+type LBEgressKey struct {
+	_     structs.HostLayout
+	SrcIP uint32
+}
+
+// LBEgressVal is generated from the BPF C type lb_egress_val.
+type LBEgressVal struct {
+	_    structs.HostLayout
+	LBIP uint32
+}
+
 // LPMV4Key is generated from the BPF C type lpm_v4_key.
 type LPMV4Key struct {
 	_   structs.HostLayout
