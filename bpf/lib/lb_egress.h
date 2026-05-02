@@ -21,8 +21,7 @@ struct {
 	__uint(map_flags, LRU_MEM_FLAVOR);
 } lb_egress_map __section_maps_btf;
 
-static __always_inline int
-lb_egress_apply_v4(struct __ctx_buff *ctx)
+static __always_inline int lb_egress_apply_v4(struct __ctx_buff *ctx)
 {
 	struct lb_egress_key key = {};
 	struct lb_egress_val *val;
@@ -35,24 +34,19 @@ lb_egress_apply_v4(struct __ctx_buff *ctx)
 	int ihl;
 	int ret;
 
-	ret = ctx_load_bytes(ctx,
-			     ETH_HLEN,
-			     &vihl,
-			     sizeof(vihl));
+	ret = ctx_load_bytes(ctx, ETH_HLEN, &vihl, sizeof(vihl));
 	if (IS_ERR(ret))
 		return ret;
 
-	ret = ctx_load_bytes(ctx,
-			     ETH_HLEN + offsetof(struct iphdr, protocol),
-			     &protocol,
-			     sizeof(protocol));
+	ret = ctx_load_bytes(
+		ctx, ETH_HLEN + offsetof(struct iphdr, protocol), &protocol,
+		sizeof(protocol));
 	if (IS_ERR(ret))
 		return ret;
 
-	ret = ctx_load_bytes(ctx,
-			     ETH_HLEN + offsetof(struct iphdr, saddr),
-			     &old_saddr,
-			     sizeof(old_saddr));
+	ret = ctx_load_bytes(
+		ctx, ETH_HLEN + offsetof(struct iphdr, saddr), &old_saddr,
+		sizeof(old_saddr));
 	if (IS_ERR(ret))
 		return ret;
 
@@ -73,9 +67,9 @@ lb_egress_apply_v4(struct __ctx_buff *ctx)
 	case IPPROTO_SCTP:
 		csum_l4_offset_and_flags(protocol, &csum);
 
-		ret = csum_l4_replace(ctx, l4_off, &csum,
-				      old_saddr, new_saddr,
-				      BPF_F_PSEUDO_HDR | sizeof(new_saddr));
+		ret = csum_l4_replace(
+			ctx, l4_off, &csum, old_saddr, new_saddr,
+			BPF_F_PSEUDO_HDR | sizeof(new_saddr));
 		if (IS_ERR(ret))
 			return ret;
 		break;
@@ -83,19 +77,15 @@ lb_egress_apply_v4(struct __ctx_buff *ctx)
 		break;
 	}
 
-	ret = l3_csum_replace(ctx,
-			      ETH_HLEN + offsetof(struct iphdr, check),
-			      old_saddr,
-			      new_saddr,
-			      BPF_F_HDR_FIELD_MASK);
+	ret = l3_csum_replace(
+		ctx, ETH_HLEN + offsetof(struct iphdr, check), old_saddr,
+		new_saddr, BPF_F_HDR_FIELD_MASK);
 	if (IS_ERR(ret))
 		return ret;
 
-	ret = ctx_store_bytes(ctx,
-			      ETH_HLEN + offsetof(struct iphdr, saddr),
-			      &new_saddr,
-			      sizeof(new_saddr),
-			      0);
+	ret = ctx_store_bytes(
+		ctx, ETH_HLEN + offsetof(struct iphdr, saddr), &new_saddr,
+		sizeof(new_saddr), 0);
 	if (IS_ERR(ret))
 		return ret;
 
