@@ -1273,9 +1273,9 @@ ipv4_forward_to_destination(struct __ctx_buff *ctx, struct iphdr *ip4,
 	
 	}
 	
-	ret = lb_egress_apply_v4(ctx, ip4);
-	if (IS_ERR(ret))
-		return ret;
+	ret = lb_egress_apply_v4(ctx);
+        if (IS_ERR(ret))
+	    return ret;
 
 	/* L7 proxy result in VTEP redirection in bpf_host, but when L7 proxy disabled
 	 * We want VTEP redirection handled earlier here to avoid packets passing to

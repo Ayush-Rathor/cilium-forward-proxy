@@ -22,26 +22,42 @@ struct {
 } lb_egress_map __section_maps_btf;
 
 static __always_inline int
-lb_egress_apply_v4(struct __ctx_buff *ctx, struct iphdr *ip4)
+lb_egress_apply_v4(struct __ctx_buff *ctx)
 {
 	struct lb_egress_key key = {};
 	struct lb_egress_val *val;
 	struct csum_offset csum = {};
 	__be32 old_saddr;
 	__be32 new_saddr;
+	__u8 vihl;
 	__u8 protocol;
-	int ihl;
 	int l4_off;
+	int ihl;
 	int ret;
 
-	/*
-	 * Important:
-	 * Copy all packet-header fields we need before calling helpers.
-	 * Do not read ip4->... after map lookup / checksum / store helpers.
-	 */
-	old_saddr = ip4->saddr;
-	protocol = ip4->protocol;
-	ihl = ipv4_hdrlen(ip4);
+	ret = ctx_load_bytes(ctx,
+			     ETH_HLEN,
+			     &vihl,
+			     sizeof(vihl));
+	if (IS_ERR(ret))
+		return ret;
+
+	ret = ctx_load_bytes(ctx,
+			     ETH_HLEN + offsetof(struct iphdr, protocol),
+			     &protocol,
+			     sizeof(protocol));
+	if (IS_ERR(ret))
+		return ret;
+
+	ret = ctx_load_bytes(ctx,
+			     ETH_HLEN + offsetof(struct iphdr, saddr),
+			     &old_saddr,
+			     sizeof(old_saddr));
+	if (IS_ERR(ret))
+		return ret;
+
+	ihl = (vihl & 0x0f) * 4;
+	l4_off = ETH_HLEN + ihl;
 
 	key.src_ip = old_saddr;
 
@@ -50,7 +66,6 @@ lb_egress_apply_v4(struct __ctx_buff *ctx, struct iphdr *ip4)
 		return CTX_ACT_OK;
 
 	new_saddr = val->lb_ip;
-	l4_off = ETH_HLEN + ihl;
 
 	switch (protocol) {
 	case IPPROTO_TCP:
