@@ -36,19 +36,19 @@ static __always_inline int lb_egress_apply_v4(struct __ctx_buff *ctx)
 
 	ret = ctx_load_bytes(ctx, ETH_HLEN, &vihl, sizeof(vihl));
 	if (IS_ERR(ret))
-		return ret;
+		return -101;
 
 	ret = ctx_load_bytes(
 		ctx, ETH_HLEN + offsetof(struct iphdr, protocol), &protocol,
 		sizeof(protocol));
 	if (IS_ERR(ret))
-		return ret;
+		return -102;
 
 	ret = ctx_load_bytes(
 		ctx, ETH_HLEN + offsetof(struct iphdr, saddr), &old_saddr,
 		sizeof(old_saddr));
 	if (IS_ERR(ret))
-		return ret;
+		return -103;
 
 	ihl = (vihl & 0x0f) * 4;
 	l4_off = ETH_HLEN + ihl;
@@ -64,14 +64,19 @@ static __always_inline int lb_egress_apply_v4(struct __ctx_buff *ctx)
 	switch (protocol) {
 	case IPPROTO_TCP:
 	case IPPROTO_UDP:
-	case IPPROTO_SCTP:
 		csum_l4_offset_and_flags(protocol, &csum);
 
 		ret = csum_l4_replace(
 			ctx, l4_off, &csum, old_saddr, new_saddr,
 			BPF_F_PSEUDO_HDR | sizeof(new_saddr));
 		if (IS_ERR(ret))
-			return ret;
+			return -201;
+		break;
+	case IPPROTO_SCTP:
+		/*
+                 * Do not try to update SCTP checksum with TCP/UDP checksum helper.
+                 * SCTP uses CRC32c, so skip it for now.
+                 */
 		break;
 	default:
 		break;
@@ -79,15 +84,15 @@ static __always_inline int lb_egress_apply_v4(struct __ctx_buff *ctx)
 
 	ret = l3_csum_replace(
 		ctx, ETH_HLEN + offsetof(struct iphdr, check), old_saddr,
-		new_saddr, BPF_F_HDR_FIELD_MASK);
+		new_saddr, sizeof(new_saddr));
 	if (IS_ERR(ret))
-		return ret;
+		return -301;
 
 	ret = ctx_store_bytes(
 		ctx, ETH_HLEN + offsetof(struct iphdr, saddr), &new_saddr,
 		sizeof(new_saddr), 0);
 	if (IS_ERR(ret))
-		return ret;
+		return -401;
 
 	return CTX_ACT_OK;
 }
