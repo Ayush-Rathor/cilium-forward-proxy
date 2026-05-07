@@ -641,6 +641,25 @@ type LBEgressKey struct {
 	SrcIP uint32
 }
 
+// LBEgressRevKey is generated from the BPF C type lb_egress_rev_key.
+type LBEgressRevKey struct {
+	_       structs.HostLayout
+	SrcIP   uint32
+	DstIP   uint32
+	SrcPort uint16
+	DstPort uint16
+	Proto   uint8
+	Pad     [3]uint8
+}
+
+// LBEgressRevVal is generated from the BPF C type lb_egress_rev_val.
+type LBEgressRevVal struct {
+	_       structs.HostLayout
+	PodIP   uint32
+	PodPort uint16
+	Pad     uint16
+}
+
 // LBEgressVal is generated from the BPF C type lb_egress_val.
 type LBEgressVal struct {
 	_    structs.HostLayout

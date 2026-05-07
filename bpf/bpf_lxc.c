@@ -1283,22 +1283,6 @@ static __always_inline int ipv4_forward_to_destination(
 		}
 	}
 
-	{
-		void *data, *data_end;
-
-		ret = lb_egress_apply_v4(ctx);
-		if (IS_ERR(ret))
-			return ret;
-
-		/*
-	 * lb_egress_apply_v4() may update packet bytes/checksums.
-	 * Packet data pointers must be revalidated before this function
-	 * continues to use ip4.
-	 */
-		if (!revalidate_data(ctx, &data, &data_end, &ip4))
-			return DROP_INVALID;
-	}
-
 	/* L7 proxy result in VTEP redirection in bpf_host, but when L7 proxy disabled
 	 * We want VTEP redirection handled earlier here to avoid packets passing to
 	 * stack to bpf_host for VTEP redirection. When L7 proxy enabled, but no
@@ -1593,6 +1577,13 @@ handle_ipv4_from_lxc(struct __ctx_buff *ctx, __u32 *dst_sec_identity, __s8 *ext_
 			}
 			return verdict;
 		}
+
+		ret = lb_egress_apply_v4(ctx);
+		if (IS_ERR(ret))
+			return ret;
+
+		if (!revalidate_data(ctx, &data, &data_end, &ip4))
+			return DROP_INVALID;
 
 		break;
 	case CT_RELATED:
