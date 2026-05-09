@@ -18,9 +18,32 @@ var Cell = cell.Module(
 	cell.Provide(func(lc cell.Lifecycle) bpf.MapOut[*bpf.Map] {
 		lc.Append(cell.Hook{
 			OnStart: func(cell.HookContext) error {
-				return Map.OpenOrCreate()
+				if err := Map.OpenOrCreate(); err != nil {
+					return err
+				}
+
+				if err := RevMap.OpenOrCreate(); err != nil {
+					Map.Close()
+					return err
+				}
+
+				if err := DeleteAll(); err != nil {
+					RevMap.Close()
+					Map.Close()
+					return err
+				}
+
+				if err := DeleteAllReverse(); err != nil {
+					RevMap.Close()
+					Map.Close()
+					return err
+				}
+
+				return nil
 			},
+
 			OnStop: func(cell.HookContext) error {
+				RevMap.Close()
 				return Map.Close()
 			},
 		})
@@ -31,6 +54,7 @@ var Cell = cell.Module(
 
 const (
 	MapName    = "lb_egress_map"
+	RevMapName = "lb_egress_rev_map"
 	MaxEntries = 65536
 )
 
@@ -50,6 +74,49 @@ var Map = bpf.NewMap(
 	MaxEntries,
 	0,
 )
+
+type RevKey struct {
+	SrcIP   [4]byte  `align:"src_ip"`
+	DstIP   [4]byte  `align:"dst_ip"`
+	SrcPort uint16   `align:"src_port"`
+	DstPort uint16   `align:"dst_port"`
+	Proto   uint8    `align:"proto"`
+	Pad     [3]uint8 `align:"pad"`
+}
+
+type RevValue struct {
+	PodIP   [4]byte `align:"pod_ip"`
+	PodPort uint16  `align:"pod_port"`
+	Pad     uint16  `align:"pad"`
+}
+
+var RevMap = bpf.NewMap(
+	RevMapName,
+	ebpf.LRUHash,
+	&RevKey{},
+	&RevValue{},
+	MaxEntries,
+	0,
+)
+
+func (k *RevKey) String() string {
+	return fmt.Sprintf(
+		"%s:%d -> %s:%d proto=%d",
+		netip.AddrFrom4(k.SrcIP),
+		k.SrcPort,
+		netip.AddrFrom4(k.DstIP),
+		k.DstPort,
+		k.Proto,
+	)
+}
+
+func (v *RevValue) String() string {
+	return fmt.Sprintf(
+		"pod=%s:%d",
+		netip.AddrFrom4(v.PodIP),
+		v.PodPort,
+	)
+}
 
 func NewKey(podIP netip.Addr) (*Key, error) {
 	if !podIP.Is4() {
@@ -130,4 +197,123 @@ func (v *Value) New() bpf.MapValue {
 func (v *Value) DeepCopyMapValue() bpf.MapValue {
 	copy := *v
 	return &copy
+}
+
+func (k *RevKey) New() bpf.MapKey {
+	return &RevKey{}
+}
+
+func (k *RevKey) NewValue() bpf.MapValue {
+	return &RevValue{}
+}
+
+func (k *RevKey) GetKeyPtr() unsafe.Pointer {
+	return unsafe.Pointer(k)
+}
+
+func (k *RevKey) DeepCopyMapKey() bpf.MapKey {
+	copy := *k
+	return &copy
+}
+
+func (v *RevValue) New() bpf.MapValue {
+	return &RevValue{}
+}
+
+func (v *RevValue) GetValuePtr() unsafe.Pointer {
+	return unsafe.Pointer(v)
+}
+
+func (v *RevValue) DeepCopyMapValue() bpf.MapValue {
+	copy := *v
+	return &copy
+}
+
+func DeleteReverseByPodIP(podIP netip.Addr) error {
+	if !podIP.Is4() {
+		return fmt.Errorf("pod IP must be IPv4: %s", podIP)
+	}
+
+	podIPBytes := podIP.As4()
+	keysToDelete := make([]bpf.MapKey, 0)
+
+	err := RevMap.DumpWithCallback(func(key bpf.MapKey, value bpf.MapValue) {
+		revKey, ok := key.(*RevKey)
+		if !ok {
+			return
+		}
+
+		revVal, ok := value.(*RevValue)
+		if !ok {
+			return
+		}
+
+		if revVal.PodIP != podIPBytes {
+			return
+		}
+
+		keyCopy := *revKey
+		keysToDelete = append(keysToDelete, &keyCopy)
+	})
+	if err != nil {
+		return err
+	}
+
+	for _, key := range keysToDelete {
+		if err := RevMap.Delete(key); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func DeleteAll() error {
+	keysToDelete := make([]bpf.MapKey, 0)
+
+	err := Map.DumpWithCallback(func(key bpf.MapKey, value bpf.MapValue) {
+		mapKey, ok := key.(*Key)
+		if !ok {
+			return
+		}
+
+		keyCopy := *mapKey
+		keysToDelete = append(keysToDelete, &keyCopy)
+	})
+	if err != nil {
+		return err
+	}
+
+	for _, key := range keysToDelete {
+		if err := Map.Delete(key); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func DeleteAllReverse() error {
+	keysToDelete := make([]bpf.MapKey, 0)
+
+	err := RevMap.DumpWithCallback(func(key bpf.MapKey, value bpf.MapValue) {
+		revKey, ok := key.(*RevKey)
+		if !ok {
+			return
+		}
+
+		keyCopy := *revKey
+		keysToDelete = append(keysToDelete, &keyCopy)
+	})
+	if err != nil {
+		return err
+	}
+
+	for _, key := range keysToDelete {
+		if err := RevMap.Delete(key); err != nil {
+			return err
+		}
+	}
+
+	return nil
 }

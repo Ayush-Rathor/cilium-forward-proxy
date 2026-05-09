@@ -1112,6 +1112,7 @@ func TestL2AnnouncerLifecycle(t *testing.T) {
 			func() loadbalancer.Config { return loadbalancer.DefaultConfig },
 			loadbalancer.NewFrontendsTable, statedb.RWTable[*loadbalancer.Frontend].ToTable,
 			loadbalancer.NewServicesTable, statedb.RWTable[*loadbalancer.Service].ToTable,
+			loadbalancer.NewBackendsTable, statedb.RWTable[*loadbalancer.Backend].ToTable,
 		),
 		cell.Provide(tables.NewL2AnnounceTable),
 		cell.Provide(tables.NewDeviceTable, statedb.RWTable[*tables.Device].ToTable),

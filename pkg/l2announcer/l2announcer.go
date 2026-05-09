@@ -36,6 +36,7 @@ import (
 	"github.com/cilium/cilium/pkg/k8s/slim/k8s/apis/labels"
 	slim_meta_v1 "github.com/cilium/cilium/pkg/k8s/slim/k8s/apis/meta/v1"
 	"github.com/cilium/cilium/pkg/k8s/utils"
+	"github.com/cilium/cilium/pkg/lb_egress"
 	"github.com/cilium/cilium/pkg/loadbalancer"
 	"github.com/cilium/cilium/pkg/logging/logfields"
 	"github.com/cilium/cilium/pkg/option"
@@ -72,6 +73,7 @@ type l2AnnouncerParams struct {
 	Clientset            k8sClient.Clientset
 	Services             statedb.Table[*loadbalancer.Service]
 	Frontends            statedb.Table[*loadbalancer.Frontend]
+	Backends             statedb.Table[*loadbalancer.Backend]
 	L2AnnouncementPolicy resource.Resource[*cilium_api_v2alpha1.CiliumL2AnnouncementPolicy]
 	LocalNodeResource    daemon_k8s.LocalCiliumNodeResource
 	L2AnnounceTable      statedb.RWTable[*tables.L2AnnounceEntry]
@@ -86,6 +88,8 @@ type l2AnnouncerParams struct {
 // components consume them and handle traffic for the IP+netdev entries.
 type L2Announcer struct {
 	params l2AnnouncerParams
+
+	lbEgressController *lb_egress.Controller
 
 	policyStore resource.Store[*cilium_api_v2alpha1.CiliumL2AnnouncementPolicy]
 	localNode   *v2.CiliumNode
@@ -108,11 +112,12 @@ func NewL2Announcer(params l2AnnouncerParams) *L2Announcer {
 	// These values were picked because it seemed right, change if necessary
 	const leaderElectionBufferSize = 16
 	announcer := &L2Announcer{
-		params:            params,
-		selectedServices:  make(map[types.NamespacedName]*selectedService),
-		selectedPolicies:  make(map[types.NamespacedName]*selectedPolicy),
-		leaderChannel:     make(chan leaderElectionEvent, leaderElectionBufferSize),
-		devicesUpdatedSig: make(chan struct{}, 1),
+		params:             params,
+		selectedServices:   make(map[types.NamespacedName]*selectedService),
+		selectedPolicies:   make(map[types.NamespacedName]*selectedPolicy),
+		leaderChannel:      make(chan leaderElectionEvent, leaderElectionBufferSize),
+		devicesUpdatedSig:  make(chan struct{}, 1),
+		lbEgressController: lb_egress.NewController(),
 	}
 
 	// Can't operate or GC if client set is disabled
@@ -138,9 +143,21 @@ func NewL2Announcer(params l2AnnouncerParams) *L2Announcer {
 }
 
 func (l2a *L2Announcer) run(ctx context.Context, health cell.Health) error {
-	// Start watching the 'services' table for changes.
-	wtxn := l2a.params.StateDB.WriteTxn(l2a.params.Services)
+	// Start watching the 'services' and 'backends' tables for changes.
+	wtxn := l2a.params.StateDB.WriteTxn(l2a.params.Services, l2a.params.Backends)
+
 	svcChangeIter, err := l2a.params.Services.Changes(wtxn)
+	if err != nil {
+		wtxn.Abort()
+		return err
+	}
+
+	backendChangeIter, err := l2a.params.Backends.Changes(wtxn)
+	if err != nil {
+		wtxn.Abort()
+		return err
+	}
+
 	wtxn.Commit()
 	if err != nil {
 		return err
@@ -151,6 +168,14 @@ func (l2a *L2Announcer) run(ctx context.Context, health cell.Health) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	case <-servicesInitialized:
+	}
+
+	// Wait for backends to initialize
+	_, backendsInitialized := l2a.params.Backends.Initialized(l2a.params.StateDB.ReadTxn())
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-backendsInitialized:
 	}
 
 	// Grab the store for policies. This blocks until it has initialized.
@@ -196,11 +221,22 @@ loop:
 			}
 		}
 
+		backendChanges, backendWatch := backendChangeIter.Next(l2a.params.StateDB.ReadTxn())
+		for event := range backendChanges {
+			if err := l2a.processBackendEvent(event); err != nil {
+				l2a.params.Logger.Warn("Error processing backend event",
+					logfields.Error, err,
+				)
+			}
+		}
+
 		select {
 		case <-ctx.Done():
 			break loop
 
 		case <-svcWatch:
+
+		case <-backendWatch:
 
 		case event, more := <-policyChan:
 			// resource closed, shutting down
@@ -384,7 +420,12 @@ func (l2a *L2Announcer) upsertSvc(svc *loadbalancer.Service) error {
 			return fmt.Errorf("recalculateL2EntriesTableEntries: %w", err)
 		}
 
+		if err := l2a.reconcileLBEgressSourceIP(ss); err != nil {
+			return fmt.Errorf("reconcileLBEgressSourceIP: %w", err)
+		}
+
 		return nil
+
 	}
 
 	// Service is not selected, check if any policies match.
@@ -442,12 +483,37 @@ func (l2a *L2Announcer) processSvcEvent(event statedb.Change[*loadbalancer.Servi
 	return err
 }
 
+func (l2a *L2Announcer) processBackendEvent(event statedb.Change[*loadbalancer.Backend]) error {
+	svcKey := types.NamespacedName{
+		Namespace: event.Object.ServiceName.Namespace(),
+		Name:      event.Object.ServiceName.Name(),
+	}
+
+	ss, found := l2a.selectedServices[svcKey]
+	if !found {
+		return nil
+	}
+
+	if err := l2a.reconcileLBEgressSourceIP(ss); err != nil {
+		return fmt.Errorf("reconcileLBEgressSourceIP: %w", err)
+	}
+
+	return nil
+}
+
 func policyKey(policy *cilium_api_v2alpha1.CiliumL2AnnouncementPolicy) types.NamespacedName {
 	return types.NamespacedName{Name: policy.Name}
 }
 
 func serviceKey(svc *loadbalancer.Service) types.NamespacedName {
 	return types.NamespacedName{Namespace: svc.Name.Namespace(), Name: svc.Name.Name()}
+}
+
+func resourceKeyFromNamespacedName(key types.NamespacedName) resource.Key {
+	return resource.Key{
+		Namespace: key.Namespace,
+		Name:      key.Name,
+	}
 }
 
 func (l2a *L2Announcer) upsertPolicy(ctx context.Context, policy *cilium_api_v2alpha1.CiliumL2AnnouncementPolicy) error {
@@ -607,7 +673,12 @@ func (l2a *L2Announcer) upsertPolicy(ctx context.Context, policy *cilium_api_v2a
 				return fmt.Errorf("recalculateNeighborProxyTableEntries: %w", err)
 			}
 
+			if err := l2a.reconcileLBEgressSourceIP(ss); err != nil {
+				return fmt.Errorf("reconcileLBEgressSourceIP: %w", err)
+			}
+
 			continue
+
 		}
 
 		l2a.addSelectedService(svc, externalAddresses, lbAddresses, []types.NamespacedName{key})
@@ -853,6 +924,10 @@ func (l2a *L2Announcer) gcOrphanedService(ss *selectedService) error {
 	// Stop leader election routine
 	ss.stop()
 
+	if err := l2a.lbEgressController.CleanupService(resourceKeyFromNamespacedName(serviceKey(ss.svc))); err != nil {
+		return fmt.Errorf("cleanup lb egress source IP service: %w", err)
+	}
+
 	// Recalculation will remove all entries since we stopped the leader election.
 	if err := l2a.recalculateL2EntriesTableEntries(ss); err != nil {
 		return fmt.Errorf("recalculateNeighborProxyTableEntries: %w", err)
@@ -933,11 +1008,76 @@ func (l2a *L2Announcer) upsertLocalNode(ctx context.Context, localNode *v2.Ciliu
 	return errs
 }
 
+func (l2a *L2Announcer) reconcileLBEgressSourceIP(ss *selectedService) error {
+	if ss == nil || ss.svc == nil {
+		return nil
+	}
+
+	if !ss.svc.EgressSourceLBIP || !ss.currentlyLeader {
+		return l2a.lbEgressController.Reconcile(
+			resourceKeyFromNamespacedName(serviceKey(ss.svc)),
+			ss.svc.EgressSourceLBIP,
+			ss.currentlyLeader,
+			ss.lbAddresses,
+			nil,
+		)
+	}
+
+	backendIPs, err := l2a.backendIPsForService(ss.svc)
+	if err != nil {
+		return fmt.Errorf("backendIPsForService: %w", err)
+	}
+
+	return l2a.lbEgressController.Reconcile(
+		resourceKeyFromNamespacedName(serviceKey(ss.svc)),
+		ss.svc.EgressSourceLBIP,
+		ss.currentlyLeader,
+		ss.lbAddresses,
+		backendIPs,
+	)
+}
+
+func (l2a *L2Announcer) backendIPsForService(svc *loadbalancer.Service) ([]netip.Addr, error) {
+	if l2a.params.Backends == nil {
+		return nil, nil
+	}
+
+	txn := l2a.params.StateDB.ReadTxn()
+
+	backends, _ := loadbalancer.ListBackendsByServiceName(
+		txn,
+		l2a.params.Backends,
+		svc.Name,
+	)
+
+	backendIPs := make([]netip.Addr, 0)
+
+	for backend := range backends {
+		if backend.State != loadbalancer.BackendStateActive {
+			continue
+		}
+
+		backendIP := backend.Address.Addr()
+		if !backendIP.IsValid() || !backendIP.Is4() {
+			continue
+		}
+
+		backendIPs = append(backendIPs, backendIP)
+	}
+
+	return backendIPs, nil
+}
+
 func (l2a *L2Announcer) processLeaderEvent(event leaderElectionEvent) error {
 	event.selectedService.currentlyLeader = event.typ == leaderElectionLeading
+
 	err := l2a.recalculateL2EntriesTableEntries(event.selectedService)
 	if err != nil {
 		return fmt.Errorf("recalculateNeighborProxyTableEntries: %w", err)
+	}
+
+	if err := l2a.reconcileLBEgressSourceIP(event.selectedService); err != nil {
+		return fmt.Errorf("reconcileLBEgressSourceIP: %w", err)
 	}
 
 	return nil
