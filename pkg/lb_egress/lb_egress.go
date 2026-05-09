@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright Authors of Cilium
+
 package lb_egress
 
 import (
@@ -7,31 +10,39 @@ import (
 	maplbegress "github.com/cilium/cilium/pkg/maps/lbegress"
 )
 
-type Controller struct {
-	entries     map[resource.Key]map[netip.Addr]netip.Addr
-	initialized bool
+type mapOperations interface {
+	Update(podIP, lbIP netip.Addr) error
+	Delete(podIP netip.Addr) error
+	DeleteReverseByPodIP(podIP netip.Addr) error
 }
 
-func (c *Controller) initialize() error {
-	if c.initialized {
-		return nil
-	}
+type realMapOperations struct{}
 
-	if err := maplbegress.DeleteAll(); err != nil {
-		return err
-	}
+func (realMapOperations) Update(podIP, lbIP netip.Addr) error {
+	return maplbegress.Update(podIP, lbIP)
+}
 
-	if err := maplbegress.DeleteAllReverse(); err != nil {
-		return err
-	}
+func (realMapOperations) Delete(podIP netip.Addr) error {
+	return maplbegress.Delete(podIP)
+}
 
-	c.initialized = true
-	return nil
+func (realMapOperations) DeleteReverseByPodIP(podIP netip.Addr) error {
+	return maplbegress.DeleteReverseByPodIP(podIP)
+}
+
+type Controller struct {
+	entries map[resource.Key]map[netip.Addr]netip.Addr
+	maps    mapOperations
 }
 
 func NewController() *Controller {
+	return newControllerWithMapOperations(realMapOperations{})
+}
+
+func newControllerWithMapOperations(maps mapOperations) *Controller {
 	return &Controller{
 		entries: map[resource.Key]map[netip.Addr]netip.Addr{},
+		maps:    maps,
 	}
 }
 
@@ -42,11 +53,6 @@ func (c *Controller) Reconcile(
 	lbAddrs []netip.Addr,
 	backendIPs []netip.Addr,
 ) error {
-
-	if err := c.initialize(); err != nil {
-		return err
-	}
-
 	if !enabled || !currentlyLeader {
 		return c.cleanupService(svcKey)
 	}
@@ -70,10 +76,6 @@ func (c *Controller) Reconcile(
 }
 
 func (c *Controller) CleanupService(svcKey resource.Key) error {
-	if err := c.initialize(); err != nil {
-		return err
-	}
-
 	return c.cleanupService(svcKey)
 }
 
@@ -114,7 +116,7 @@ func (c *Controller) reconcile(
 			continue
 		}
 
-		if err := maplbegress.Update(podIP, lbIP); err != nil {
+		if err := c.maps.Update(podIP, lbIP); err != nil {
 			return err
 		}
 
@@ -131,11 +133,11 @@ func (c *Controller) reconcile(
 }
 
 func (c *Controller) deletePodEntries(podIP netip.Addr) error {
-	if err := maplbegress.Delete(podIP); err != nil {
+	if err := c.maps.Delete(podIP); err != nil {
 		return err
 	}
 
-	if err := maplbegress.DeleteReverseByPodIP(podIP); err != nil {
+	if err := c.maps.DeleteReverseByPodIP(podIP); err != nil {
 		return err
 	}
 
