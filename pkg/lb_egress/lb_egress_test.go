@@ -4,22 +4,30 @@
 package lb_egress
 
 import (
+	"github.com/stretchr/testify/require"
 	"net/netip"
 	"testing"
 
 	"github.com/cilium/cilium/pkg/k8s/resource"
 )
 
+var testOwnerIP = netip.MustParseAddr("10.20.32.185")
+
 type fakeMapOperations struct {
-	entries           map[netip.Addr]netip.Addr
-	deleted           []netip.Addr
-	reverseDeleted    []netip.Addr
-	updateCallCounter int
+	entries        map[netip.Addr]netip.Addr
+	steerEntries   map[netip.Addr]steerEntry
+	deleted        []netip.Addr
+	steerDeleted   []netip.Addr
+	reverseDeleted []netip.Addr
+
+	updateCallCounter      int
+	steerUpdateCallCounter int
 }
 
 func newFakeMapOperations() *fakeMapOperations {
 	return &fakeMapOperations{
-		entries: map[netip.Addr]netip.Addr{},
+		entries:      map[netip.Addr]netip.Addr{},
+		steerEntries: map[netip.Addr]steerEntry{},
 	}
 }
 
@@ -32,6 +40,21 @@ func (f *fakeMapOperations) Update(podIP, lbIP netip.Addr) error {
 func (f *fakeMapOperations) Delete(podIP netip.Addr) error {
 	delete(f.entries, podIP)
 	f.deleted = append(f.deleted, podIP)
+	return nil
+}
+
+func (f *fakeMapOperations) UpdateSteer(podIP, lbIP, ownerIP netip.Addr) error {
+	f.steerEntries[podIP] = steerEntry{
+		LBIP:    lbIP,
+		OwnerIP: ownerIP,
+	}
+	f.steerUpdateCallCounter++
+	return nil
+}
+
+func (f *fakeMapOperations) DeleteSteer(podIP netip.Addr) error {
+	delete(f.steerEntries, podIP)
+	f.steerDeleted = append(f.steerDeleted, podIP)
 	return nil
 }
 
@@ -53,6 +76,7 @@ func TestReconcileProgramsDesiredPodEntries(t *testing.T) {
 		true,
 		true,
 		[]netip.Addr{lbIP},
+		testOwnerIP,
 		[]netip.Addr{podIP},
 	)
 	if err != nil {
@@ -62,6 +86,59 @@ func TestReconcileProgramsDesiredPodEntries(t *testing.T) {
 	if got := maps.entries[podIP]; got != lbIP {
 		t.Fatalf("expected pod %s to map to LB IP %s, got %s", podIP, lbIP, got)
 	}
+}
+
+func TestReconcileProgramsSteerOnAllNodesButSNATOnlyOnOwner(t *testing.T) {
+	maps := newFakeMapOperations()
+	c := newControllerWithMapOperations(maps)
+
+	svcKey := resource.Key{Namespace: "default", Name: "svc"}
+	podIP := netip.MustParseAddr("10.233.80.10")
+	lbIP := netip.MustParseAddr("10.20.32.240")
+	ownerIP := netip.MustParseAddr("10.20.32.185")
+
+	err := c.Reconcile(
+		svcKey,
+		true,
+		false, // this node is not owner
+		[]netip.Addr{lbIP},
+		ownerIP,
+		[]netip.Addr{podIP},
+	)
+	require.NoError(t, err)
+
+	require.Empty(t, maps.entries)
+
+	require.Equal(t, steerEntry{
+		LBIP:    lbIP,
+		OwnerIP: ownerIP,
+	}, maps.steerEntries[podIP])
+}
+
+func TestReconcileProgramsSteerAndSNATOnOwner(t *testing.T) {
+	maps := newFakeMapOperations()
+	c := newControllerWithMapOperations(maps)
+
+	svcKey := resource.Key{Namespace: "default", Name: "svc"}
+	podIP := netip.MustParseAddr("10.233.80.10")
+	lbIP := netip.MustParseAddr("10.20.32.240")
+	ownerIP := netip.MustParseAddr("10.20.32.185")
+
+	err := c.Reconcile(
+		svcKey,
+		true,
+		true, // this node is owner
+		[]netip.Addr{lbIP},
+		ownerIP,
+		[]netip.Addr{podIP},
+	)
+	require.NoError(t, err)
+
+	require.Equal(t, lbIP, maps.entries[podIP])
+	require.Equal(t, steerEntry{
+		LBIP:    lbIP,
+		OwnerIP: ownerIP,
+	}, maps.steerEntries[podIP])
 }
 
 func TestReconcileDeletesStalePodAndReverseEntries(t *testing.T) {
@@ -78,6 +155,7 @@ func TestReconcileDeletesStalePodAndReverseEntries(t *testing.T) {
 		true,
 		true,
 		[]netip.Addr{lbIP},
+		testOwnerIP,
 		[]netip.Addr{oldPodIP, newPodIP},
 	)
 	if err != nil {
@@ -89,6 +167,7 @@ func TestReconcileDeletesStalePodAndReverseEntries(t *testing.T) {
 		true,
 		true,
 		[]netip.Addr{lbIP},
+		testOwnerIP,
 		[]netip.Addr{newPodIP},
 	)
 	if err != nil {
@@ -120,11 +199,25 @@ func TestCleanupServiceIsScopedToOneService(t *testing.T) {
 	lb1 := netip.MustParseAddr("10.20.32.240")
 	lb2 := netip.MustParseAddr("10.20.32.241")
 
-	if err := controller.Reconcile(svc1, true, true, []netip.Addr{lb1}, []netip.Addr{pod1}); err != nil {
+	if err := controller.Reconcile(
+		svc1,
+		true,
+		true,
+		[]netip.Addr{lb1},
+		testOwnerIP,
+		[]netip.Addr{pod1},
+	); err != nil {
 		t.Fatalf("reconcile svc1 failed: %v", err)
 	}
 
-	if err := controller.Reconcile(svc2, true, true, []netip.Addr{lb2}, []netip.Addr{pod2}); err != nil {
+	if err := controller.Reconcile(
+		svc2,
+		true,
+		true,
+		[]netip.Addr{lb2},
+		testOwnerIP,
+		[]netip.Addr{pod2},
+	); err != nil {
 		t.Fatalf("reconcile svc2 failed: %v", err)
 	}
 
@@ -154,11 +247,25 @@ func TestReconcileCleansUpWhenDisabledOrNotLeader(t *testing.T) {
 	podIP := netip.MustParseAddr("10.233.82.152")
 	lbIP := netip.MustParseAddr("10.20.32.240")
 
-	if err := controller.Reconcile(svcKey, true, true, []netip.Addr{lbIP}, []netip.Addr{podIP}); err != nil {
+	if err := controller.Reconcile(
+		svcKey,
+		true,
+		true,
+		[]netip.Addr{lbIP},
+		testOwnerIP,
+		[]netip.Addr{podIP},
+	); err != nil {
 		t.Fatalf("initial reconcile failed: %v", err)
 	}
 
-	if err := controller.Reconcile(svcKey, false, true, []netip.Addr{lbIP}, []netip.Addr{podIP}); err != nil {
+	if err := controller.Reconcile(
+		svcKey,
+		false,
+		true,
+		[]netip.Addr{lbIP},
+		testOwnerIP,
+		[]netip.Addr{podIP},
+	); err != nil {
 		t.Fatalf("disabled reconcile failed: %v", err)
 	}
 

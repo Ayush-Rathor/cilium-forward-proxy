@@ -1008,17 +1008,47 @@ func (l2a *L2Announcer) upsertLocalNode(ctx context.Context, localNode *v2.Ciliu
 	return errs
 }
 
+func (l2a *L2Announcer) lbEgressOwnerNodeIP() (netip.Addr, bool) {
+	if l2a.localNode == nil {
+		return netip.Addr{}, false
+	}
+
+	for _, addr := range l2a.localNode.Spec.Addresses {
+		if addr.Type != "InternalIP" && addr.Type != "CiliumInternalIP" {
+			continue
+		}
+
+		ip, err := netip.ParseAddr(addr.IP)
+		if err != nil || !ip.Is4() {
+			continue
+		}
+
+		return ip, true
+	}
+
+	return netip.Addr{}, false
+}
+
 func (l2a *L2Announcer) reconcileLBEgressSourceIP(ss *selectedService) error {
 	if ss == nil || ss.svc == nil {
 		return nil
 	}
 
-	if !ss.svc.EgressSourceLBIP || !ss.currentlyLeader {
+	svcKey := resourceKeyFromNamespacedName(serviceKey(ss.svc))
+
+	if !ss.svc.EgressSourceLBIP {
+		return l2a.lbEgressController.CleanupService(svcKey)
+	}
+
+	ownerNodeIP := netip.MustParseAddr("0.0.0.0")
+
+	if !ss.currentlyLeader {
 		return l2a.lbEgressController.Reconcile(
-			resourceKeyFromNamespacedName(serviceKey(ss.svc)),
+			svcKey,
 			ss.svc.EgressSourceLBIP,
 			ss.currentlyLeader,
 			ss.lbAddresses,
+			ownerNodeIP,
 			nil,
 		)
 	}
@@ -1029,10 +1059,11 @@ func (l2a *L2Announcer) reconcileLBEgressSourceIP(ss *selectedService) error {
 	}
 
 	return l2a.lbEgressController.Reconcile(
-		resourceKeyFromNamespacedName(serviceKey(ss.svc)),
+		svcKey,
 		ss.svc.EgressSourceLBIP,
 		ss.currentlyLeader,
 		ss.lbAddresses,
+		ownerNodeIP,
 		backendIPs,
 	)
 }

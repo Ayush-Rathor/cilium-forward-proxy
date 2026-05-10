@@ -124,6 +124,7 @@ const (
 	CiliumXDPScratch                    = "cilium_xdp_scratch"
 	LBEgressMap                         = "lb_egress_map"
 	LBEgressRevMap                      = "lb_egress_rev_map"
+	LBEgressSteerMap                    = "lb_egress_steer_map"
 )
 
 func newCiliumAuthMapSpec(btf *btf.Spec) *ebpf.MapSpec {
@@ -1325,6 +1326,20 @@ func newLBEgressRevMapSpec(btf *btf.Spec) *ebpf.MapSpec {
 	}
 }
 
+func newLBEgressSteerMapSpec(btf *btf.Spec) *ebpf.MapSpec {
+	return &ebpf.MapSpec{
+		Name:       LBEgressSteerMap,
+		Type:       ebpf.LRUHash,
+		KeySize:    4,
+		Key:        anyTypeByName(btf, "lb_egress_steer_key"),
+		ValueSize:  8,
+		Value:      anyTypeByName(btf, "lb_egress_steer_val"),
+		MaxEntries: 65536,
+		Flags:      0,
+		Pinning:    ebpf.PinByName,
+	}
+}
+
 var _outer []newMapFn = []newMapFn{
 	newCiliumAuthMapSpec,
 	newCiliumCallPolicySpec,
@@ -1403,6 +1418,7 @@ var _outer []newMapFn = []newMapFn{
 	newCiliumXDPScratchSpec,
 	newLBEgressMapSpec,
 	newLBEgressRevMapSpec,
+	newLBEgressSteerMapSpec,
 }
 
 //go:embed mapkv.btf

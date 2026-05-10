@@ -4,6 +4,24 @@
 #include "map_defs.h"
 #include "csum.h"
 
+struct lb_egress_steer_key {
+	__be32 src_ip; /* pod IP */
+};
+
+struct lb_egress_steer_val {
+	__be32 lb_ip;
+	__be32 owner_ip; /* VIP owner node IP */
+};
+
+struct {
+	__uint(type, BPF_MAP_TYPE_LRU_HASH);
+	__type(key, struct lb_egress_steer_key);
+	__type(value, struct lb_egress_steer_val);
+	__uint(pinning, LIBBPF_PIN_BY_NAME);
+	__uint(max_entries, 65536);
+	__uint(map_flags, LRU_MEM_FLAVOR);
+} lb_egress_steer_map __section_maps_btf;
+
 struct lb_egress_key {
 	__be32 src_ip;
 };
@@ -22,8 +40,8 @@ struct {
 } lb_egress_map __section_maps_btf;
 
 struct lb_egress_rev_key {
-	__be32 src_ip;   /* external target IP */
-	__be32 dst_ip;   /* LB IP */
+	__be32 src_ip;	 /* external target IP */
+	__be32 dst_ip;	 /* LB IP */
 	__be16 src_port; /* external target port */
 	__be16 dst_port; /* LB source port */
 	__u8 proto;
@@ -68,18 +86,21 @@ static __always_inline int lb_egress_apply_v4(struct __ctx_buff *ctx)
 	if (IS_ERR(ret))
 		return ret;
 
-	ret = ctx_load_bytes(ctx, ETH_HLEN + offsetof(struct iphdr, protocol),
-			     &protocol, sizeof(protocol));
+	ret = ctx_load_bytes(
+		ctx, ETH_HLEN + offsetof(struct iphdr, protocol), &protocol,
+		sizeof(protocol));
 	if (IS_ERR(ret))
 		return ret;
 
-	ret = ctx_load_bytes(ctx, ETH_HLEN + offsetof(struct iphdr, saddr),
-			     &old_saddr, sizeof(old_saddr));
+	ret = ctx_load_bytes(
+		ctx, ETH_HLEN + offsetof(struct iphdr, saddr), &old_saddr,
+		sizeof(old_saddr));
 	if (IS_ERR(ret))
 		return ret;
 
-	ret = ctx_load_bytes(ctx, ETH_HLEN + offsetof(struct iphdr, daddr),
-			     &dst_ip, sizeof(dst_ip));
+	ret = ctx_load_bytes(
+		ctx, ETH_HLEN + offsetof(struct iphdr, daddr), &dst_ip,
+		sizeof(dst_ip));
 	if (IS_ERR(ret))
 		return ret;
 
@@ -101,8 +122,9 @@ static __always_inline int lb_egress_apply_v4(struct __ctx_buff *ctx)
 		if (IS_ERR(ret))
 			return ret;
 
-		ret = ctx_load_bytes(ctx, l4_off + sizeof(src_port),
-				     &dst_port, sizeof(dst_port));
+		ret = ctx_load_bytes(
+			ctx, l4_off + sizeof(src_port), &dst_port,
+			sizeof(dst_port));
 		if (IS_ERR(ret))
 			return ret;
 
@@ -117,9 +139,9 @@ static __always_inline int lb_egress_apply_v4(struct __ctx_buff *ctx)
 	case IPPROTO_UDP:
 		csum_l4_offset_and_flags(protocol, &csum);
 
-		ret = csum_l4_replace(ctx, l4_off, &csum,
-				      old_saddr, new_saddr,
-				      BPF_F_PSEUDO_HDR | sizeof(new_saddr));
+		ret = csum_l4_replace(
+			ctx, l4_off, &csum, old_saddr, new_saddr,
+			BPF_F_PSEUDO_HDR | sizeof(new_saddr));
 		if (IS_ERR(ret))
 			return ret;
 		break;
@@ -133,16 +155,15 @@ static __always_inline int lb_egress_apply_v4(struct __ctx_buff *ctx)
 		break;
 	}
 
-	ret = l3_csum_replace(ctx,
-			      ETH_HLEN + offsetof(struct iphdr, check),
-			      old_saddr, new_saddr,
-			      sizeof(new_saddr));
+	ret = l3_csum_replace(
+		ctx, ETH_HLEN + offsetof(struct iphdr, check), old_saddr,
+		new_saddr, sizeof(new_saddr));
 	if (IS_ERR(ret))
 		return ret;
 
-	ret = ctx_store_bytes(ctx,
-			      ETH_HLEN + offsetof(struct iphdr, saddr),
-			      &new_saddr, sizeof(new_saddr), 0);
+	ret = ctx_store_bytes(
+		ctx, ETH_HLEN + offsetof(struct iphdr, saddr), &new_saddr,
+		sizeof(new_saddr), 0);
 	if (IS_ERR(ret))
 		return ret;
 
@@ -156,8 +177,8 @@ static __always_inline int lb_egress_apply_v4(struct __ctx_buff *ctx)
 		rev_val.pod_ip = old_saddr;
 		rev_val.pod_port = src_port;
 
-		ret = map_update_elem(&lb_egress_rev_map, &rev_key, &rev_val,
-				      BPF_ANY);
+		ret = map_update_elem(
+			&lb_egress_rev_map, &rev_key, &rev_val, BPF_ANY);
 		if (IS_ERR(ret))
 			return ret;
 	}
@@ -184,18 +205,21 @@ static __always_inline int lb_egress_reverse_v4(struct __ctx_buff *ctx)
 	if (IS_ERR(ret))
 		return ret;
 
-	ret = ctx_load_bytes(ctx, ETH_HLEN + offsetof(struct iphdr, protocol),
-			     &protocol, sizeof(protocol));
+	ret = ctx_load_bytes(
+		ctx, ETH_HLEN + offsetof(struct iphdr, protocol), &protocol,
+		sizeof(protocol));
 	if (IS_ERR(ret))
 		return ret;
 
-	ret = ctx_load_bytes(ctx, ETH_HLEN + offsetof(struct iphdr, saddr),
-			     &src_ip, sizeof(src_ip));
+	ret = ctx_load_bytes(
+		ctx, ETH_HLEN + offsetof(struct iphdr, saddr), &src_ip,
+		sizeof(src_ip));
 	if (IS_ERR(ret))
 		return ret;
 
-	ret = ctx_load_bytes(ctx, ETH_HLEN + offsetof(struct iphdr, daddr),
-			     &old_daddr, sizeof(old_daddr));
+	ret = ctx_load_bytes(
+		ctx, ETH_HLEN + offsetof(struct iphdr, daddr), &old_daddr,
+		sizeof(old_daddr));
 	if (IS_ERR(ret))
 		return ret;
 
@@ -209,8 +233,9 @@ static __always_inline int lb_egress_reverse_v4(struct __ctx_buff *ctx)
 		if (IS_ERR(ret))
 			return ret;
 
-		ret = ctx_load_bytes(ctx, l4_off + sizeof(src_port),
-				     &dst_port, sizeof(dst_port));
+		ret = ctx_load_bytes(
+			ctx, l4_off + sizeof(src_port), &dst_port,
+			sizeof(dst_port));
 		if (IS_ERR(ret))
 			return ret;
 		break;
@@ -230,22 +255,21 @@ static __always_inline int lb_egress_reverse_v4(struct __ctx_buff *ctx)
 
 	csum_l4_offset_and_flags(protocol, &csum);
 
-	ret = csum_l4_replace(ctx, l4_off, &csum,
-			      old_daddr, val->pod_ip,
-			      BPF_F_PSEUDO_HDR | sizeof(val->pod_ip));
+	ret = csum_l4_replace(
+		ctx, l4_off, &csum, old_daddr, val->pod_ip,
+		BPF_F_PSEUDO_HDR | sizeof(val->pod_ip));
 	if (IS_ERR(ret))
 		return ret;
 
-	ret = l3_csum_replace(ctx,
-			      ETH_HLEN + offsetof(struct iphdr, check),
-			      old_daddr, val->pod_ip,
-			      sizeof(val->pod_ip));
+	ret = l3_csum_replace(
+		ctx, ETH_HLEN + offsetof(struct iphdr, check), old_daddr,
+		val->pod_ip, sizeof(val->pod_ip));
 	if (IS_ERR(ret))
 		return ret;
 
-	ret = ctx_store_bytes(ctx,
-			      ETH_HLEN + offsetof(struct iphdr, daddr),
-			      &val->pod_ip, sizeof(val->pod_ip), 0);
+	ret = ctx_store_bytes(
+		ctx, ETH_HLEN + offsetof(struct iphdr, daddr), &val->pod_ip,
+		sizeof(val->pod_ip), 0);
 	if (IS_ERR(ret))
 		return ret;
 

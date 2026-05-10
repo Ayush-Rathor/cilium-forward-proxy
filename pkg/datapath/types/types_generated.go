@@ -660,6 +660,19 @@ type LBEgressRevVal struct {
 	Pad     uint16
 }
 
+// LBEgressSteerKey is generated from the BPF C type lb_egress_steer_key.
+type LBEgressSteerKey struct {
+	_     structs.HostLayout
+	SrcIP uint32
+}
+
+// LBEgressSteerVal is generated from the BPF C type lb_egress_steer_val.
+type LBEgressSteerVal struct {
+	_       structs.HostLayout
+	LBIP    uint32
+	OwnerIP uint32
+}
+
 // LBEgressVal is generated from the BPF C type lb_egress_val.
 type LBEgressVal struct {
 	_    structs.HostLayout
