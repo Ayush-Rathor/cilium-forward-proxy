@@ -42,6 +42,7 @@ import (
 	"github.com/cilium/cilium/pkg/option"
 	"github.com/cilium/cilium/pkg/shortener"
 	"github.com/cilium/cilium/pkg/time"
+	corev1 "k8s.io/api/core/v1"
 )
 
 var Cell = cell.Module(
@@ -1045,17 +1046,6 @@ func (l2a *L2Announcer) reconcileLBEgressSourceIP(ss *selectedService) error {
 		return l2a.lbEgressController.CleanupService(svcKey)
 	}
 
-	if !ss.currentlyLeader {
-		return l2a.lbEgressController.Reconcile(
-			svcKey,
-			ss.svc.EgressSourceLBIP,
-			ss.currentlyLeader,
-			ss.lbAddresses,
-			ownerNodeIP,
-			nil,
-		)
-	}
-
 	backendIPs, err := l2a.backendIPsForService(ss.svc)
 	if err != nil {
 		return fmt.Errorf("backendIPsForService: %w", err)
@@ -1076,25 +1066,66 @@ func (l2a *L2Announcer) lbEgressNodeIPByName(nodeName string) (netip.Addr, bool)
 		return netip.Addr{}, false
 	}
 
-	if l2a.localNode == nil {
+	// Fast path: local CiliumNode is already cached by L2Announcer.
+	if l2a.localNode != nil && l2a.localNode.Name == nodeName {
+		if ip, ok := lbEgressCiliumNodeIPv4(l2a.localNode); ok {
+			return ip, true
+		}
+	}
+
+	if !l2a.params.Clientset.IsEnabled() {
 		return netip.Addr{}, false
 	}
 
-	/*
-	 * First step:
-	 * Resolve only the local node. Next patch will resolve remote nodes from
-	 * the node store.
-	 */
-	if l2a.localNode.Name != nodeName {
+	node, err := l2a.params.Clientset.CoreV1().Nodes().Get(
+		context.Background(),
+		nodeName,
+		metav1.GetOptions{},
+	)
+	if err != nil {
+		l2a.params.Logger.Debug(
+			"Failed to resolve LB egress owner node from Kubernetes Node",
+			logfields.Error, err,
+			logfields.NodeName, nodeName,
+		)
 		return netip.Addr{}, false
 	}
 
-	for _, addr := range l2a.localNode.Spec.Addresses {
+	return lbEgressK8sNodeIPv4(node)
+}
+
+func lbEgressCiliumNodeIPv4(node *v2.CiliumNode) (netip.Addr, bool) {
+	if node == nil {
+		return netip.Addr{}, false
+	}
+
+	for _, addr := range node.Spec.Addresses {
 		if addr.Type != "InternalIP" && addr.Type != "CiliumInternalIP" {
 			continue
 		}
 
 		ip, err := netip.ParseAddr(addr.IP)
+		if err != nil || !ip.Is4() {
+			continue
+		}
+
+		return ip, true
+	}
+
+	return netip.Addr{}, false
+}
+
+func lbEgressK8sNodeIPv4(node *corev1.Node) (netip.Addr, bool) {
+	if node == nil {
+		return netip.Addr{}, false
+	}
+
+	for _, addr := range node.Status.Addresses {
+		if addr.Type != corev1.NodeInternalIP {
+			continue
+		}
+
+		ip, err := netip.ParseAddr(addr.Address)
 		if err != nil || !ip.Is4() {
 			continue
 		}
