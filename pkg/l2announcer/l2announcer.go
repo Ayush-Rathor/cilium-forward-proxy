@@ -1040,7 +1040,10 @@ func (l2a *L2Announcer) reconcileLBEgressSourceIP(ss *selectedService) error {
 		return l2a.lbEgressController.CleanupService(svcKey)
 	}
 
-	ownerNodeIP := netip.MustParseAddr("0.0.0.0")
+	ownerNodeIP := ss.lbEgressOwnerNodeIP
+	if !ownerNodeIP.IsValid() || !ownerNodeIP.Is4() {
+		return l2a.lbEgressController.CleanupService(svcKey)
+	}
 
 	if !ss.currentlyLeader {
 		return l2a.lbEgressController.Reconcile(
@@ -1066,6 +1069,40 @@ func (l2a *L2Announcer) reconcileLBEgressSourceIP(ss *selectedService) error {
 		ownerNodeIP,
 		backendIPs,
 	)
+}
+
+func (l2a *L2Announcer) lbEgressNodeIPByName(nodeName string) (netip.Addr, bool) {
+	if nodeName == "" {
+		return netip.Addr{}, false
+	}
+
+	if l2a.localNode == nil {
+		return netip.Addr{}, false
+	}
+
+	/*
+	 * First step:
+	 * Resolve only the local node. Next patch will resolve remote nodes from
+	 * the node store.
+	 */
+	if l2a.localNode.Name != nodeName {
+		return netip.Addr{}, false
+	}
+
+	for _, addr := range l2a.localNode.Spec.Addresses {
+		if addr.Type != "InternalIP" && addr.Type != "CiliumInternalIP" {
+			continue
+		}
+
+		ip, err := netip.ParseAddr(addr.IP)
+		if err != nil || !ip.Is4() {
+			continue
+		}
+
+		return ip, true
+	}
+
+	return netip.Addr{}, false
 }
 
 func (l2a *L2Announcer) backendIPsForService(svc *loadbalancer.Service) ([]netip.Addr, error) {
@@ -1100,14 +1137,40 @@ func (l2a *L2Announcer) backendIPsForService(svc *loadbalancer.Service) ([]netip
 }
 
 func (l2a *L2Announcer) processLeaderEvent(event leaderElectionEvent) error {
-	event.selectedService.currentlyLeader = event.typ == leaderElectionLeading
+	ss := event.selectedService
+	if ss == nil {
+		return nil
+	}
 
-	err := l2a.recalculateL2EntriesTableEntries(event.selectedService)
+	switch event.typ {
+	case leaderElectionLeading:
+		ss.currentlyLeader = true
+
+	case leaderElectionStoppedLeading:
+		ss.currentlyLeader = false
+
+	case leaderElectionNewLeader:
+		// OnNewLeader tells us who owns the VIP.
+		// It does not by itself mean this local node is leader.
+	}
+
+	if event.leaderIdentity != "" {
+		ss.lbEgressOwnerNodeName = event.leaderIdentity
+
+		ownerIP, ok := l2a.lbEgressNodeIPByName(event.leaderIdentity)
+		if ok {
+			ss.lbEgressOwnerNodeIP = ownerIP
+		} else {
+			ss.lbEgressOwnerNodeIP = netip.Addr{}
+		}
+	}
+
+	err := l2a.recalculateL2EntriesTableEntries(ss)
 	if err != nil {
 		return fmt.Errorf("recalculateNeighborProxyTableEntries: %w", err)
 	}
 
-	if err := l2a.reconcileLBEgressSourceIP(event.selectedService); err != nil {
+	if err := l2a.reconcileLBEgressSourceIP(ss); err != nil {
 		return fmt.Errorf("reconcileLBEgressSourceIP: %w", err)
 	}
 
@@ -1303,6 +1366,10 @@ type selectedService struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 	done   chan struct{}
+
+	// Leader Identity for lbegressmap
+	lbEgressOwnerNodeName string
+	lbEgressOwnerNodeIP   netip.Addr
 }
 
 func (ss *selectedService) serviceLeaderElection(ctx context.Context, health cell.Health) error {
@@ -1329,12 +1396,21 @@ func (ss *selectedService) serviceLeaderElection(ctx context.Context, health cel
 						ss.leaderChannel <- leaderElectionEvent{
 							typ:             leaderElectionLeading,
 							selectedService: ss,
+							leaderIdentity:  ss.lock.Identity(),
 						}
+						<-ctx.Done()
 					},
 					OnStoppedLeading: func() {
 						ss.leaderChannel <- leaderElectionEvent{
 							typ:             leaderElectionStoppedLeading,
 							selectedService: ss,
+						}
+					},
+					OnNewLeader: func(identity string) {
+						ss.leaderChannel <- leaderElectionEvent{
+							typ:             leaderElectionNewLeader,
+							selectedService: ss,
+							leaderIdentity:  identity,
 						}
 					},
 				},
@@ -1356,11 +1432,13 @@ type leaderElectionEventType int
 const (
 	leaderElectionLeading leaderElectionEventType = iota
 	leaderElectionStoppedLeading
+	leaderElectionNewLeader
 )
 
 type leaderElectionEvent struct {
 	typ             leaderElectionEventType
 	selectedService *selectedService
+	leaderIdentity  string
 }
 
 type selectedPolicy struct {
