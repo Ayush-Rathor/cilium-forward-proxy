@@ -1578,12 +1578,39 @@ handle_ipv4_from_lxc(struct __ctx_buff *ctx, __u32 *dst_sec_identity, __s8 *ext_
 			return verdict;
 		}
 
-		ret = lb_egress_apply_v4(ctx);
-		if (IS_ERR(ret))
-			return ret;
+		{
+			__be32 lb_ip = 0;
+			__be32 owner_ip = 0;
+			int steer;
+			int applied;
 
-		if (!revalidate_data(ctx, &data, &data_end, &ip4))
-			return DROP_INVALID;
+			steer = lb_egress_lookup_steer_v4(ctx, &lb_ip, &owner_ip);
+			if (IS_ERR(steer))
+				return steer;
+
+			if (steer > 0) {
+				applied = lb_egress_apply_v4(ctx);
+				if (IS_ERR(applied))
+					return applied;
+
+				if (applied > 0) {
+					if (!revalidate_data(
+						    ctx, &data, &data_end, &ip4))
+						return DROP_INVALID;
+				}
+
+				/*
+		 * If steer > 0 but applied == 0, this is the future remote-owner
+		 * case:
+		 *
+		 *   source node has lb_egress_steer_map entry
+		 *   source node does not have lb_egress_map entry
+		 *
+		 * For now we intentionally keep normal Cilium forwarding.
+		 * Next patch will redirect/tunnel this packet to owner_ip.
+		 */
+			}
+		}
 
 		break;
 	case CT_RELATED:

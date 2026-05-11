@@ -22,6 +22,32 @@ struct {
 	__uint(map_flags, LRU_MEM_FLAVOR);
 } lb_egress_steer_map __section_maps_btf;
 
+static __always_inline int
+lb_egress_lookup_steer_v4(struct __ctx_buff *ctx, __be32 *lb_ip, __be32 *owner_ip)
+{
+	struct lb_egress_steer_key key = {};
+	struct lb_egress_steer_val *val;
+	__be32 src_ip;
+	int ret;
+
+	ret = ctx_load_bytes(
+		ctx, ETH_HLEN + offsetof(struct iphdr, saddr), &src_ip,
+		sizeof(src_ip));
+	if (IS_ERR(ret))
+		return ret;
+
+	key.src_ip = src_ip;
+
+	val = map_lookup_elem(&lb_egress_steer_map, &key);
+	if (!val)
+		return 0;
+
+	*lb_ip = val->lb_ip;
+	*owner_ip = val->owner_ip;
+
+	return 1;
+}
+
 struct lb_egress_key {
 	__be32 src_ip;
 };
@@ -111,7 +137,7 @@ static __always_inline int lb_egress_apply_v4(struct __ctx_buff *ctx)
 
 	val = map_lookup_elem(&lb_egress_map, &key);
 	if (!val)
-		return CTX_ACT_OK;
+		return 0;
 
 	new_saddr = val->lb_ip;
 
@@ -183,7 +209,7 @@ static __always_inline int lb_egress_apply_v4(struct __ctx_buff *ctx)
 			return ret;
 	}
 
-	return CTX_ACT_OK;
+	return 1;
 }
 
 static __always_inline int lb_egress_reverse_v4(struct __ctx_buff *ctx)
