@@ -1596,19 +1596,28 @@ handle_ipv4_from_lxc(struct __ctx_buff *ctx, __u32 *dst_sec_identity, __s8 *ext_
 				if (applied > 0) {
 					if (!revalidate_data(
 						    ctx, &data, &data_end, &ip4))
-						return DROP_INVALID;
-				}
 
-				/*
-		 * If steer > 0 but applied == 0, this is the future remote-owner
-		 * case:
-		 *
-		 *   source node has lb_egress_steer_map entry
-		 *   source node does not have lb_egress_map entry
-		 *
-		 * For now we intentionally keep normal Cilium forwarding.
-		 * Next patch will redirect/tunnel this packet to owner_ip.
-		 */
+						return DROP_INVALID;
+
+				} else {
+					struct remote_endpoint_info fake_info = {};
+
+					if (owner_ip == 0)
+
+						return DROP_NO_TUNNEL_ENDPOINT;
+
+					fake_info.tunnel_endpoint.ip4.be32 =
+						owner_ip;
+
+					fake_info.flag_has_tunnel_ep = true;
+
+					return encap_and_redirect_lxc(
+						ctx, &fake_info, SECLABEL_IPV4,
+
+						WORLD_IPV4_ID, &trace,
+
+						bpf_htons(ETH_P_IP));
+				}
 			}
 		}
 
