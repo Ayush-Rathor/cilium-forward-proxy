@@ -630,9 +630,28 @@ static __always_inline int handle_ipv4(
 		ret = lb_egress_reverse_v4(ctx);
 		if (IS_ERR(ret))
 			return ret;
+		if (ret > 0) {
+			const struct remote_endpoint_info *lbeg_info;
 
-		if (!revalidate_data(ctx, &data, &data_end, &ip4))
-			return DROP_INVALID;
+			if (!revalidate_data(ctx, &data, &data_end, &ip4))
+				return DROP_INVALID;
+
+# ifdef TUNNEL_MODE
+			lbeg_info = lookup_ip4_remote_endpoint(ip4->daddr, 0);
+			if (lbeg_info && lbeg_info->flag_has_tunnel_ep &&
+			    !lbeg_info->flag_skip_tunnel) {
+				struct trace_ctx lbeg_trace = {
+					.reason = TRACE_REASON_UNKNOWN,
+					.monitor = 0,
+				};
+
+				return encap_and_redirect_with_nodeid(
+					ctx, lbeg_info, secctx,
+					lbeg_info->sec_identity, &lbeg_trace,
+					bpf_htons(ETH_P_IP));
+			}
+# endif
+		}
 	}
 
 # ifdef ENABLE_NODEPORT
@@ -642,7 +661,6 @@ static __always_inline int handle_ipv4(
 
 			ret = nodeport_lb4(
 				ctx, ip4, secctx, punt_to_stack, ext_err, &is_dsr);
-
 			/* nodeport_lb4() returns with TC_ACT_REDIRECT for
 			 * traffic to L7 LB. Policy enforcement needs to take
 			 * place after L7 LB has processed the packet, so we

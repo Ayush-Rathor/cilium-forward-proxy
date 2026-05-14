@@ -1041,6 +1041,8 @@ func (l2a *L2Announcer) reconcileLBEgressSourceIP(ss *selectedService) error {
 		return l2a.lbEgressController.CleanupService(svcKey)
 	}
 
+	l2a.refreshLBEgressOwnerFromLease(ss)
+
 	ownerNodeIP := ss.lbEgressOwnerNodeIP
 	if !ownerNodeIP.IsValid() || !ownerNodeIP.Is4() {
 		return l2a.lbEgressController.CleanupService(svcKey)
@@ -1134,6 +1136,46 @@ func lbEgressK8sNodeIPv4(node *corev1.Node) (netip.Addr, bool) {
 	}
 
 	return netip.Addr{}, false
+}
+
+func (l2a *L2Announcer) refreshLBEgressOwnerFromLease(ss *selectedService) {
+	if ss == nil || ss.lock == nil {
+		return
+	}
+
+	if !l2a.params.Clientset.IsEnabled() {
+		return
+	}
+
+	lease, err := l2a.params.Clientset.CoordinationV1().
+		Leases(ss.lock.LeaseMeta.Namespace).
+		Get(context.Background(), ss.lock.LeaseMeta.Name, metav1.GetOptions{})
+	if err != nil {
+		l2a.params.Logger.Debug(
+			"Failed to refresh LB egress owner from lease",
+			logfields.Error, err,
+			logfields.ServiceName, ss.svc.Name,
+		)
+		return
+	}
+
+	if lease.Spec.HolderIdentity == nil || *lease.Spec.HolderIdentity == "" {
+		return
+	}
+
+	ownerName := *lease.Spec.HolderIdentity
+	ownerIP, ok := l2a.lbEgressNodeIPByName(ownerName)
+	if !ok {
+		l2a.params.Logger.Debug(
+			"Failed to resolve LB egress owner node IP from lease holder",
+			logfields.NodeName, ownerName,
+			logfields.ServiceName, ss.svc.Name,
+		)
+		return
+	}
+
+	ss.lbEgressOwnerNodeName = ownerName
+	ss.lbEgressOwnerNodeIP = ownerIP
 }
 
 func (l2a *L2Announcer) backendIPsForService(svc *loadbalancer.Service) ([]netip.Addr, error) {

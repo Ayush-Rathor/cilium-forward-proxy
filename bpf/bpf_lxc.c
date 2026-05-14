@@ -845,6 +845,7 @@ pass_to_stack:
  * In the case of the caller doing the service translation it passes in state via CB,
  * which we take in with lb6_ctx_restore_state().
  */
+
 static __always_inline int
 handle_ipv6_from_lxc(struct __ctx_buff *ctx, __u32 *dst_sec_identity, __s8 *ext_err)
 {
@@ -1165,6 +1166,41 @@ struct {
 } cilium_tail_call_buffer4 __section_maps_btf;
 
 #ifdef ENABLE_IPV4
+
+static __always_inline int
+lb_egress_handle_pod_egress_v4(struct __ctx_buff *ctx, struct trace_ctx *trace)
+{
+	struct remote_endpoint_info fake_info = {};
+	__be32 lb_ip = 0;
+	__be32 owner_ip = 0;
+	int steer;
+	int applied;
+
+	steer = lb_egress_lookup_steer_v4(ctx, &lb_ip, &owner_ip);
+	if (IS_ERR(steer))
+		return steer;
+
+	if (steer == 0)
+		return 0;
+
+	applied = lb_egress_apply_v4(ctx);
+	if (IS_ERR(applied))
+		return applied;
+
+	if (applied > 0)
+		return 1;
+
+	if (owner_ip == 0)
+		return DROP_NO_TUNNEL_ENDPOINT;
+
+	fake_info.tunnel_endpoint.ip4.be32 = owner_ip;
+	fake_info.flag_has_tunnel_ep = true;
+
+	return encap_and_redirect_lxc(
+		ctx, &fake_info, SECLABEL_IPV4, WORLD_IPV4_ID, trace,
+		bpf_htons(ETH_P_IP));
+}
+
 static __always_inline int ipv4_forward_to_destination(
 	struct __ctx_buff *ctx, struct iphdr *ip4, struct ipv4_ct_tuple *tuple,
 	const __u32 dst_sec_identity, const struct ct_state *ct_state,
@@ -1281,6 +1317,17 @@ static __always_inline int ipv4_forward_to_destination(
 				ctx, ETH_HLEN, SECLABEL_IPV4, MARK_MAGIC_IDENTITY,
 				ip4, ep, METRIC_EGRESS, from_l7lb, false, 0);
 		}
+		/*
+         * LB egress source-IP steering.
+         *
+         * This must live in ipv4_forward_to_destination() as a final guard
+         * before traffic escapes the pod node through the normal forwarding
+         * path. The earlier policy-verdict hook catches the initial SYN in
+         * some paths, but established packets can still arrive here.
+         *
+         * Local endpoint delivery has already been checked above, so this only
+         * affects traffic that is leaving the node/cluster forwarding path.
+         */
 	}
 
 	/* L7 proxy result in VTEP redirection in bpf_host, but when L7 proxy disabled
@@ -1578,49 +1625,6 @@ handle_ipv4_from_lxc(struct __ctx_buff *ctx, __u32 *dst_sec_identity, __s8 *ext_
 			return verdict;
 		}
 
-		{
-			__be32 lb_ip = 0;
-			__be32 owner_ip = 0;
-			int steer;
-			int applied;
-
-			steer = lb_egress_lookup_steer_v4(ctx, &lb_ip, &owner_ip);
-			if (IS_ERR(steer))
-				return steer;
-
-			if (steer > 0) {
-				applied = lb_egress_apply_v4(ctx);
-				if (IS_ERR(applied))
-					return applied;
-
-				if (applied > 0) {
-					if (!revalidate_data(
-						    ctx, &data, &data_end, &ip4))
-
-						return DROP_INVALID;
-
-				} else {
-					struct remote_endpoint_info fake_info = {};
-
-					if (owner_ip == 0)
-
-						return DROP_NO_TUNNEL_ENDPOINT;
-
-					fake_info.tunnel_endpoint.ip4.be32 =
-						owner_ip;
-
-					fake_info.flag_has_tunnel_ep = true;
-
-					return encap_and_redirect_lxc(
-						ctx, &fake_info, SECLABEL_IPV4,
-
-						WORLD_IPV4_ID, &trace,
-
-						bpf_htons(ETH_P_IP));
-				}
-			}
-		}
-
 		break;
 	case CT_RELATED:
 	case CT_REPLY:
@@ -1640,6 +1644,23 @@ handle_ipv4_from_lxc(struct __ctx_buff *ctx, __u32 *dst_sec_identity, __s8 *ext_
 		break;
 	default:
 		return DROP_UNKNOWN_CT;
+	}
+
+	/*
+ * LB egress source-IP steering.
+ *
+ * This runs after policy handling for CT_NEW/CT_ESTABLISHED and also covers
+ * CT_REPLY/CT_RELATED packets before the second CT switch. For pods not selected
+ * by any annotated Service, lb_egress_handle_pod_egress_v4() returns 0 and the
+ * normal Cilium datapath continues unchanged.
+ */
+	ret = lb_egress_handle_pod_egress_v4(ctx, &trace);
+	if (ret < 0 || ret == CTX_ACT_REDIRECT)
+		return ret;
+
+	if (ret > 0) {
+		if (!revalidate_data(ctx, &data, &data_end, &ip4))
+			return DROP_INVALID;
 	}
 
 	switch (ct_status) {

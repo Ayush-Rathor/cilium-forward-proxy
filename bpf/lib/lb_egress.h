@@ -277,7 +277,7 @@ static __always_inline int lb_egress_reverse_v4(struct __ctx_buff *ctx)
 
 	val = map_lookup_elem(&lb_egress_rev_map, &key);
 	if (!val)
-		return CTX_ACT_OK;
+		return 0;
 
 	csum_l4_offset_and_flags(protocol, &csum);
 
@@ -299,5 +299,5 @@ static __always_inline int lb_egress_reverse_v4(struct __ctx_buff *ctx)
 	if (IS_ERR(ret))
 		return ret;
 
-	return CTX_ACT_OK;
+	return 1;
 }
